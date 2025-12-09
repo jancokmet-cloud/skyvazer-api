@@ -1,10 +1,23 @@
-// app/api/admin/login/route.ts
 import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { createClient } from "@supabase/supabase-js";
 
-export const runtime = "nodejs"; // kvôli bcrypt/jwt (Edge runtime by spadol)
+export const runtime = "nodejs";
+
+// COMMON HEADERS FOR ALL RESPONSES
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*", // môžeš neskôr zúžiť na localhost / vercel web
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
+
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 204,
+    headers: corsHeaders,
+  });
+}
 
 function getSupabaseClient() {
   const url = process.env.SUPABASE_URL;
@@ -19,87 +32,60 @@ function getSupabaseClient() {
 
 export async function POST(req: Request) {
   try {
-    // 1) env premenné
-    if (!process.env.JWT_SECRET) {
-      console.error("JWT_SECRET missing");
-      return NextResponse.json(
-        { error: "Server misconfigured" },
-        { status: 500 }
-      );
-    }
-
-    // 2) body
-    const body = await req.json().catch(() => ({}));
-    const { email, password } = body as {
-      email?: string;
-      password?: string;
-    };
+    const { email, password } = await req.json();
 
     if (!email || !password) {
       return NextResponse.json(
         { error: "Email and password required" },
-        { status: 400 }
+        { status: 400, headers: corsHeaders }
       );
     }
 
     const supabase = getSupabaseClient();
 
-    // 3) nájdeme admina
     const { data: user, error } = await supabase
       .from("admin_users")
       .select("*")
       .eq("email", email)
       .single();
 
-    if (error) {
-      console.error("Supabase error:", error);
-      return NextResponse.json(
-        { error: "Database error" },
-        { status: 500 }
-      );
-    }
-
-    if (!user) {
+    if (error || !user) {
       return NextResponse.json(
         { error: "Invalid email or password" },
-        { status: 401 }
+        { status: 401, headers: corsHeaders }
       );
     }
 
-    // 4) skontrolujeme heslo
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) {
       return NextResponse.json(
         { error: "Invalid email or password" },
-        { status: 401 }
+        { status: 401, headers: corsHeaders }
       );
     }
 
-    // 5) vytvoríme JWT token
     const token = jwt.sign(
-      {
-        id: user.id,
-        email: user.email,
-        role: "admin",
-      },
-      process.env.JWT_SECRET,
+      { id: user.id, email: user.email, role: "admin" },
+      process.env.JWT_SECRET!,
       { expiresIn: "2h" }
     );
 
-    return NextResponse.json({ token }, { status: 200 });
+    return NextResponse.json(
+      { token },
+      { status: 200, headers: corsHeaders }
+    );
   } catch (err) {
-    console.error("Admin login error:", err);
+    console.error("Login error:", err);
     return NextResponse.json(
       { error: "Internal server error" },
-      { status: 500 }
+      { status: 500, headers: corsHeaders }
     );
   }
 }
 
-// voliteľne: vrátiť 405 pre GET
 export async function GET() {
   return NextResponse.json(
     { error: "Method not allowed" },
-    { status: 405 }
+    { status: 405, headers: corsHeaders }
   );
 }
