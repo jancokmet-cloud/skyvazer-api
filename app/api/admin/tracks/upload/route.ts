@@ -1,48 +1,57 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import jwt from "jsonwebtoken";
+import formidable from "formidable";
+import fs from "fs";
 
-export const runtime = "nodejs";
-
-// 🔥 CORS hlavičky, ktoré budeme používať
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
-};
-
-// 🔥 OPTIONS request (preflight) — MUSÍME odpovedať 200
+// 👇 toto opraví CORS
 export async function OPTIONS() {
-  return NextResponse.json({}, { status: 200, headers: corsHeaders });
+  return new NextResponse(null, {
+    status: 200,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    },
+  });
 }
 
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
+
+// MAIN POST HANDLER
 export async function POST(req: Request) {
   try {
-    // 1) Overenie autorizácie
+    // CORS hlavičky pre POST odpoveď
+    const corsHeaders = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    };
+
+    // Autorizácia
     const auth = req.headers.get("authorization");
-    if (!auth || !auth.startsWith("Bearer ")) {
+    if (!auth) {
       return NextResponse.json(
-        { error: "Unauthorized" },
+        { error: "Missing Authorization header" },
         { status: 401, headers: corsHeaders }
       );
     }
 
-    const token = auth.replace("Bearer ", "");
-    let decoded: any;
+    // MP3 PARSING
+    const form = formidable({ multiples: false, maxFileSize: 30 * 1024 * 1024 });
 
-    try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET!);
-    } catch (err) {
-      return NextResponse.json(
-        { error: "Invalid token" },
-        { status: 401, headers: corsHeaders }
-      );
-    }
+    const data = await new Promise((resolve, reject) => {
+      form.parse(req as any, (err, fields, files) => {
+        if (err) reject(err);
+        resolve({ fields, files });
+      });
+    });
 
-    // 2) Prečítanie FormData z requestu
-    const form = await req.formData();
-    const file = form.get("file") as File | null;
-    const title = form.get("title") as string | null;
+    const { file } = data.files as any;
+    const { title } = data.fields as any;
 
     if (!file) {
       return NextResponse.json(
@@ -51,67 +60,34 @@ export async function POST(req: Request) {
       );
     }
 
-    if (!title) {
-      return NextResponse.json(
-        { error: "Title missing" },
-        { status: 400, headers: corsHeaders }
-      );
-    }
-
-    // 3) Supabase server klient
+    // UPLOAD DO SUPABASE
     const supabase = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_URL!,
       process.env.SUPABASE_SERVICE_ROLE_KEY!
     );
 
-    // 4) Generovanie názvu súboru
-    const ext = file.name.split(".").pop();
-    const filename = `${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2)}.${ext}`;
+    const mp3Bytes = fs.readFileSync(file.filepath);
 
-    // 5) File → Buffer
-    const buffer = Buffer.from(await file.arrayBuffer());
-
-    // 6) Upload do Supabase Storage
-    const { error: uploadError } = await supabase.storage
+    const uploadResult = await supabase.storage
       .from("tracks")
-      .upload(filename, buffer, {
-        contentType: file.type,
-      });
+      .upload(`tracks/${file.originalFilename}`, mp3Bytes);
 
-    if (uploadError) {
-      console.error(uploadError);
+    if (uploadResult.error) {
       return NextResponse.json(
-        { error: "Upload error" },
+        { error: uploadResult.error.message },
         { status: 500, headers: corsHeaders }
       );
     }
 
-    // URL súboru
-    const { data: urlData } = supabase
-      .storage
-      .from("tracks")
-      .getPublicUrl(filename);
-
-    // 7) Insert do DB
-    await supabase.from("tracks").insert({
-      title,
-      filename,
-      url: urlData.publicUrl,
-      uploaded_by: decoded.email,
-    });
-
     return NextResponse.json(
-      { ok: true, url: urlData.publicUrl },
+      { ok: true, title },
       { status: 200, headers: corsHeaders }
     );
-
   } catch (err) {
     console.error(err);
     return NextResponse.json(
       { error: "Server error" },
-      { status: 500, headers: corsHeaders }
+      { status: 500 }
     );
   }
 }
