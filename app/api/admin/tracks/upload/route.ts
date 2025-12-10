@@ -1,11 +1,9 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import formidable from "formidable";
-import fs from "fs";
 
-// 👇 toto opraví CORS
-export async function OPTIONS() {
-  return new NextResponse(null, {
+// CORS pre preflight
+export function OPTIONS() {
+  return NextResponse.json({}, {
     status: 200,
     headers: {
       "Access-Control-Allow-Origin": "*",
@@ -15,79 +13,73 @@ export async function OPTIONS() {
   });
 }
 
-export const config = {
-  api: {
-    bodyParser: false,
-  },
-};
+export const runtime = "nodejs"; // DÔLEŽITÉ! bez tohto upload NEFUNGUJE
 
-// MAIN POST HANDLER
 export async function POST(req: Request) {
+  const cors = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  };
+
+  // Autorizácia
+  const auth = req.headers.get("authorization");
+  if (!auth) {
+    return NextResponse.json(
+      { error: "Missing Authorization header" },
+      { status: 401, headers: cors }
+    );
+  }
+
   try {
-    // CORS hlavičky pre POST odpoveď
-    const corsHeaders = {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    };
+    // ⬅️ NATÍVNE PARSOVANIE MULTIPART FORM DATA
+    const form = await req.formData();
 
-    // Autorizácia
-    const auth = req.headers.get("authorization");
-    if (!auth) {
-      return NextResponse.json(
-        { error: "Missing Authorization header" },
-        { status: 401, headers: corsHeaders }
-      );
-    }
-
-    // MP3 PARSING
-    const form = formidable({ multiples: false, maxFileSize: 30 * 1024 * 1024 });
-
-    const data = await new Promise((resolve, reject) => {
-      form.parse(req as any, (err, fields, files) => {
-        if (err) reject(err);
-        resolve({ fields, files });
-      });
-    });
-
-    const { file } = data.files as any;
-    const { title } = data.fields as any;
+    const file = form.get("file") as File | null;
+    const title = form.get("title") as string | null;
 
     if (!file) {
       return NextResponse.json(
         { error: "No file uploaded" },
-        { status: 400, headers: corsHeaders }
+        { status: 400, headers: cors }
       );
     }
 
-    // UPLOAD DO SUPABASE
+    const arrayBuffer = await file.arrayBuffer();
+    const fileBuffer = Buffer.from(arrayBuffer);
+
+    // Upload do Supabase
     const supabase = createClient(
       process.env.SUPABASE_URL!,
       process.env.SUPABASE_SERVICE_ROLE_KEY!
     );
 
-    const mp3Bytes = fs.readFileSync(file.filepath);
-
-    const uploadResult = await supabase.storage
+    const result = await supabase.storage
       .from("tracks")
-      .upload(`tracks/${file.originalFilename}`, mp3Bytes);
+      .upload(`tracks/${file.name}`, fileBuffer, {
+        contentType: file.type,
+      });
 
-    if (uploadResult.error) {
+    if (result.error) {
       return NextResponse.json(
-        { error: uploadResult.error.message },
-        { status: 500, headers: corsHeaders }
+        { error: result.error.message },
+        { status: 500, headers: cors }
       );
     }
 
     return NextResponse.json(
-      { ok: true, title },
-      { status: 200, headers: corsHeaders }
+      {
+        success: true,
+        path: result.data.path,
+        title,
+      },
+      { status: 200, headers: cors }
     );
   } catch (err) {
-    console.error(err);
+    console.error("UPLOAD ERROR", err);
     return NextResponse.json(
-      { error: "Server error" },
-      { status: 500 }
+      { error: "Upload failed", detail: String(err) },
+      { status: 500, headers: cors }
     );
   }
 }
